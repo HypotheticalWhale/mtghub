@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,7 +64,7 @@ const rarityMap: Record<string, string> = {
   mythic: "bg-orange-500 text-white",
 };
 
-export default function DraftPage() {
+function DraftPageContent() {
   const [availableSets, setAvailableSets] = useState<
     Array<{ code: string; name: string }>
   >([]);
@@ -798,5 +798,13 @@ export default function DraftPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function DraftPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <DraftPageContent />
+    </Suspense>
   );
 }
