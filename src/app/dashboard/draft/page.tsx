@@ -1,0 +1,802 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { Loader2, Shuffle, Users, Trophy } from "lucide-react";
+import { toast } from "sonner";
+import { mtgSync } from "@/lib/services/mtg-sync";
+
+interface MTGCard {
+  id: string;
+  name: string;
+  mana_cost?: string;
+  cmc: number;
+  type_line: string;
+  oracle_text?: string;
+  power?: string;
+  toughness?: string;
+  colors: string[];
+  rarity: string;
+  image_url?: string;
+  set_id: string;
+}
+
+interface DraftSession {
+  id: string;
+  name: string;
+  set_code: string;
+  status: string;
+  current_pack: number;
+  current_pick: number;
+  total_packs: number;
+  picks_per_pack: number;
+  user_picks: MTGCard[];
+  ai_players: {
+    player1: MTGCard[];
+    player2: MTGCard[];
+    player3: MTGCard[];
+    player4: MTGCard[];
+    player5: MTGCard[];
+    player6: MTGCard[];
+    player7: MTGCard[];
+  };
+  current_player: number; // 0 = user, 1-7 = AI players
+  pack_direction: "left" | "right"; // Direction packs are passed
+}
+
+const colorMap: Record<string, string> = {
+  W: "bg-white text-black",
+  U: "bg-blue-500 text-white",
+  B: "bg-black text-white",
+  R: "bg-red-500 text-white",
+  G: "bg-green-500 text-white",
+};
+
+const rarityMap: Record<string, string> = {
+  common: "bg-gray-500 text-white",
+  uncommon: "bg-blue-600 text-white",
+  rare: "bg-yellow-500 text-black",
+  mythic: "bg-orange-500 text-white",
+};
+
+export default function DraftPage() {
+  const [availableSets, setAvailableSets] = useState<
+    Array<{ code: string; name: string }>
+  >([]);
+  const [selectedSet, setSelectedSet] = useState("");
+  const [draftSession, setDraftSession] = useState<DraftSession | null>(null);
+  const [currentPack, setCurrentPack] = useState<MTGCard[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [viewingDraft, setViewingDraft] = useState<DraftSession | null>(null);
+  const supabase = createClient();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    loadAvailableSets();
+
+    // Check if we're viewing a specific draft
+    const draftId = searchParams.get("draftId");
+    if (draftId) {
+      loadSpecificDraft(draftId);
+    } else {
+      loadExistingSession();
+    }
+  }, [searchParams]);
+
+  const loadAvailableSets = async () => {
+    try {
+      const { data } = await supabase
+        .from("mtg_sets")
+        .select("code, name")
+        .order("release_date", { ascending: false })
+        .limit(20);
+
+      setAvailableSets(data || []);
+    } catch (error) {
+      console.error("Error loading sets:", error);
+    }
+  };
+
+  const loadExistingSession = () => {
+    const saved = localStorage.getItem("mtg_draft_session");
+    if (saved) {
+      try {
+        const session = JSON.parse(saved);
+
+        // Migrate old draft sessions to new format
+        if (!session.ai_players) {
+          session.ai_players = {
+            player1: [],
+            player2: [],
+            player3: [],
+            player4: [],
+            player5: [],
+            player6: [],
+            player7: [],
+          };
+        }
+
+        // Migrate old ai_picks to new format if it exists
+        if (session.ai_picks && Array.isArray(session.ai_picks)) {
+          // Distribute old AI picks among the 7 AI players
+          session.ai_picks.forEach((card: any, index: number) => {
+            const playerKey = `player${
+              (index % 7) + 1
+            }` as keyof typeof session.ai_players;
+            if (session.ai_players[playerKey]) {
+              session.ai_players[playerKey].push(card);
+            }
+          });
+          // Remove the old ai_picks field
+          delete session.ai_picks;
+        }
+
+        setDraftSession(session);
+        if (session.status === "active") {
+          generatePack(session.current_pack, session.set_code);
+        }
+      } catch (error) {
+        console.error("Error loading saved session:", error);
+        localStorage.removeItem("mtg_draft_session");
+      }
+    }
+  };
+
+  const loadSpecificDraft = async (draftId: string) => {
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from("mtg_draft_sessions")
+        .select("*")
+        .eq("id", draftId)
+        .single();
+
+      if (error) {
+        console.error("Error loading draft:", error);
+        toast.error("Failed to load draft");
+        return;
+      }
+
+      if (data) {
+        // Convert the database format to our DraftSession format
+        const draftSession: DraftSession = {
+          id: data.id,
+          name: data.name,
+          set_code: data.set_code,
+          status: data.status,
+          current_pack: data.total_packs || 3,
+          current_pick: data.picks_per_pack || 15,
+          total_packs: data.total_packs || 3,
+          picks_per_pack: data.picks_per_pack || 15,
+          user_picks: data.user_picks || [],
+          ai_players: data.ai_players || {
+            player1: [],
+            player2: [],
+            player3: [],
+            player4: [],
+            player5: [],
+            player6: [],
+            player7: [],
+          },
+          current_player: 0,
+          pack_direction: "left",
+        };
+
+        setViewingDraft(draftSession);
+        setDraftSession(draftSession);
+      }
+    } catch (error) {
+      console.error("Error loading specific draft:", error);
+      toast.error("Failed to load draft");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startDataSync = async () => {
+    if (syncing) {
+      return;
+    }
+
+    setSyncing(true);
+    try {
+      toast.info(
+        "Starting sync of 20 most recent sets... This may take several minutes."
+      );
+
+      const result = await mtgSync.syncRecentSets(20);
+
+      if (result.success) {
+        toast.success(
+          `Sync completed! Added ${result.totalCards} cards from recent sets.`
+        );
+        await loadAvailableSets();
+      } else {
+        toast.error(`Sync failed: ${result.error}`);
+      }
+    } catch (error) {
+      console.error("Sync error:", error);
+      toast.error("Failed to sync data from MTG API");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const generatePack = async (packNumber: number, setCode: string) => {
+    setLoading(true);
+    try {
+      // First get the set ID
+      const { data: setData, error: setError } = await supabase
+        .from("mtg_sets")
+        .select("id")
+        .eq("code", setCode)
+        .single();
+
+      if (setError || !setData) {
+        console.error("Error finding set:", setError);
+        toast.error(`Set ${setCode} not found. Please sync data first.`);
+        return;
+      }
+
+      // Get random cards from the selected set
+      const { data: cards, error: cardsError } = await supabase
+        .from("mtg_cards")
+        .select("*")
+        .eq("set_id", setData.id)
+        .limit(100); // Get more cards to shuffle from
+
+      if (cardsError) {
+        console.error("Error fetching cards:", cardsError);
+        toast.error("Failed to fetch cards from database");
+        return;
+      }
+
+      if (cards && cards.length > 0) {
+        // Shuffle and take 15 cards for the pack
+        const shuffled = [...cards].sort(() => Math.random() - 0.5);
+        setCurrentPack(shuffled.slice(0, 15));
+      } else {
+        toast.error(
+          `No cards found for set ${setCode}. Please sync data first.`
+        );
+      }
+    } catch (error) {
+      console.error("Error generating pack:", error);
+      toast.error("Failed to generate pack");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startDraft = async () => {
+    if (!selectedSet) {
+      toast.error("Please select a set first");
+      return;
+    }
+
+    const newSession: DraftSession = {
+      id: `draft_${Date.now()}`,
+      name: `Draft - ${selectedSet}`,
+      set_code: selectedSet,
+      status: "active",
+      current_pack: 1,
+      current_pick: 1,
+      total_packs: 3,
+      picks_per_pack: 15,
+      user_picks: [],
+      ai_players: {
+        player1: [],
+        player2: [],
+        player3: [],
+        player4: [],
+        player5: [],
+        player6: [],
+        player7: [],
+      },
+      current_player: 0, // Start with user
+      pack_direction: "left", // Packs start going left
+    };
+
+    setDraftSession(newSession);
+    localStorage.setItem("mtg_draft_session", JSON.stringify(newSession));
+
+    await generatePack(1, selectedSet);
+    toast.success("Draft started! Pick your first card.");
+  };
+
+  const pickCard = async (card: MTGCard) => {
+    if (!draftSession) {
+      return;
+    }
+
+    // Add card to user picks
+    const updatedUserPicks = [
+      ...draftSession.user_picks.filter((c) => c !== null),
+      card,
+    ];
+
+    // Remove picked card from current pack
+    let updatedPack = currentPack.filter((c) => c.id !== card.id);
+
+    // Process AI picks one at a time (proper pack passing)
+    const updatedAiPlayers = { ...(draftSession.ai_players || {}) };
+
+    // Simulate pack passing around the table (7 AI players pick before pack returns to user)
+    for (let aiPlayer = 1; aiPlayer <= 7; aiPlayer++) {
+      if (updatedPack.length === 0) {
+        break;
+      }
+
+      const aiPick = pickAICard(updatedPack);
+      if (aiPick) {
+        // Add to the specific AI player's picks
+        const playerKey = `player${aiPlayer}` as keyof typeof updatedAiPlayers;
+        updatedAiPlayers[playerKey] = [
+          ...updatedAiPlayers[playerKey].filter((c) => c !== null),
+          aiPick,
+        ];
+
+        // Remove AI pick from pack
+        updatedPack = updatedPack.filter((c) => c.id !== aiPick.id);
+      }
+    }
+
+    const newPickNumber = draftSession.current_pick + 1;
+    const newPackNumber =
+      newPickNumber > draftSession.picks_per_pack
+        ? draftSession.current_pack + 1
+        : draftSession.current_pack;
+
+    const updatedSession: DraftSession = {
+      ...draftSession,
+      current_pick:
+        newPickNumber > draftSession.picks_per_pack ? 1 : newPickNumber,
+      current_pack: newPackNumber,
+      user_picks: updatedUserPicks,
+      ai_players: updatedAiPlayers,
+      status: newPackNumber > draftSession.total_packs ? "completed" : "active",
+    };
+
+    setDraftSession(updatedSession);
+    setCurrentPack(updatedPack);
+    localStorage.setItem("mtg_draft_session", JSON.stringify(updatedSession));
+
+    if (updatedSession.status === "completed") {
+      toast.success("Draft completed! Saving your draft...");
+      await saveDraft(updatedSession);
+    } else if (
+      updatedPack.length === 0 ||
+      newPackNumber > draftSession.current_pack
+    ) {
+      // Start next pack when current pack is exhausted or we move to next pack
+      await generatePack(newPackNumber, draftSession.set_code);
+    }
+  };
+
+  const saveDraft = async (session: DraftSession) => {
+    try {
+      const supabase = createClient();
+
+      // Calculate total picks for each player
+      const totalUserPicks = session.user_picks.length;
+      const totalAiPicks = Object.values(session.ai_players || {}).reduce(
+        (total, picks) => total + (picks?.length || 0),
+        0
+      );
+
+      const draftData = {
+        name: session.name,
+        set_code: session.set_code,
+        status: "completed",
+        total_packs: session.total_packs,
+        picks_per_pack: session.picks_per_pack,
+        user_picks: session.user_picks,
+        ai_players: session.ai_players,
+        total_picks: totalUserPicks + totalAiPicks,
+        completed_at: new Date().toISOString(),
+      };
+
+      const { error } = await supabase
+        .from("mtg_draft_sessions")
+        .insert([draftData]);
+
+      if (error) {
+        console.error("Error saving draft:", error);
+        toast.error("Failed to save draft");
+      } else {
+        toast.success("Draft saved successfully!");
+      }
+    } catch (error) {
+      console.error("Error saving draft:", error);
+      toast.error("Failed to save draft");
+    }
+  };
+
+  const discardDraft = () => {
+    if (
+      confirm(
+        "Are you sure you want to discard this draft? This action cannot be undone."
+      )
+    ) {
+      // Clear the draft session
+      setDraftSession(null);
+      setCurrentPack([]);
+      setSelectedSet("");
+
+      // Clear from localStorage
+      localStorage.removeItem("mtg_draft_session");
+
+      toast.success("Draft discarded successfully");
+    }
+  };
+
+  const pickAICard = (pack: MTGCard[]): MTGCard | null => {
+    if (!pack || pack.length === 0) {
+      return null;
+    }
+
+    // Simple AI logic: prioritize rare/mythic, then high CMC
+    const sortedByRarity = pack.sort((a, b) => {
+      const rarityOrder = { mythic: 4, rare: 3, uncommon: 2, common: 1 };
+      const aRarity = rarityOrder[a.rarity as keyof typeof rarityOrder] || 1;
+      const bRarity = rarityOrder[b.rarity as keyof typeof rarityOrder] || 1;
+
+      if (aRarity !== bRarity) {
+        return bRarity - aRarity;
+      }
+
+      return b.cmc - a.cmc;
+    });
+
+    return sortedByRarity[0] || null;
+  };
+
+  const resetDraft = () => {
+    setDraftSession(null);
+    setCurrentPack([]);
+    localStorage.removeItem("mtg_draft_session");
+    toast.info("Draft reset");
+  };
+
+  const getColorBadges = (colors: string[]) => {
+    if (!colors || colors.length === 0) {
+      return <Badge variant="outline">Colorless</Badge>;
+    }
+    return colors.map((color) => (
+      <Badge
+        key={color}
+        className={`${colorMap[color] || "bg-gray-500 text-white"} text-xs`}
+      >
+        {color}
+      </Badge>
+    ));
+  };
+
+  const getRarityBadge = (rarity: string) => {
+    return (
+      <Badge
+        className={`${rarityMap[rarity] || "bg-gray-500 text-white"} text-xs`}
+      >
+        {rarity}
+      </Badge>
+    );
+  };
+
+  const progress = draftSession
+    ? (((draftSession.current_pack - 1) * draftSession.picks_per_pack +
+        draftSession.current_pick -
+        1) /
+        (draftSession.total_packs * draftSession.picks_per_pack)) *
+      100
+    : 0;
+
+  return (
+    <div className="container mx-auto p-6 space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-3xl font-bold">MTG Draft Simulator</h1>
+          <p className="text-muted-foreground">
+            AI-powered wheel-style drafting experience
+          </p>
+        </div>
+        <div className="flex justify-center gap-4">
+          <Button
+            onClick={startDataSync}
+            disabled={syncing}
+            className="flex items-center gap-2"
+          >
+            {syncing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Shuffle className="h-4 w-4" />
+            )}
+            Sync Sets
+          </Button>
+          <Button
+            onClick={discardDraft}
+            variant="destructive"
+            className="flex items-center gap-2"
+          >
+            <Trophy className="h-4 w-4" />
+            Discard Draft
+          </Button>
+        </div>
+      </div>
+
+      {!draftSession && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Start New Draft</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {availableSets.length === 0 ? (
+              <div className="text-center py-8">
+                <p className="text-muted-foreground mb-4">
+                  No sets available. Please sync data first.
+                </p>
+                <Button onClick={startDataSync} disabled={syncing}>
+                  {syncing ? (
+                    <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  ) : (
+                    <Shuffle className="h-4 w-4 mr-2" />
+                  )}
+                  Sync Data
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div>
+                  <label className="text-sm font-medium">Select Set:</label>
+                  <select
+                    value={selectedSet}
+                    onChange={(e) => setSelectedSet(e.target.value)}
+                    className="w-full mt-1 p-2 border rounded"
+                  >
+                    <option value="">Choose a set...</option>
+                    {availableSets.map((set) => (
+                      <option key={set.code} value={set.code}>
+                        {set.name} ({set.code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <Button onClick={startDraft} disabled={!selectedSet}>
+                  Start Draft
+                </Button>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {draftSession && draftSession.status === "active" && (
+        <>
+          {/* Draft Progress */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="h-5 w-5" />
+                Draft Progress
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex justify-between text-sm">
+                <span>
+                  Pack {draftSession.current_pack} of {draftSession.total_packs}
+                </span>
+                <span>
+                  Pick {draftSession.current_pick} of{" "}
+                  {draftSession.picks_per_pack}
+                </span>
+              </div>
+              <Progress value={progress} className="w-full" />
+              <div className="flex justify-between text-sm text-muted-foreground">
+                <span>Your Picks: {draftSession.user_picks.length}</span>
+                <span>AI Players: 7</span>
+                <span>
+                  Total Picks:{" "}
+                  {draftSession.user_picks.length +
+                    Object.values(draftSession.ai_players || {}).reduce(
+                      (total, picks) => total + (picks?.length || 0),
+                      0
+                    )}
+                </span>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Current Pack */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Current Pack - Pick One Card</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {loading ? (
+                <div className="flex justify-center py-8">
+                  <Loader2 className="h-8 w-8 animate-spin" />
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+                  {currentPack.map((card, index) =>
+                    card ? (
+                      <Card
+                        key={`${card.id}-${index}-${card.name}`}
+                        className="cursor-pointer hover:shadow-lg transition-shadow"
+                        onClick={() => pickCard(card)}
+                      >
+                        <CardContent className="p-3">
+                          <div className="space-y-2">
+                            {card.image_url && (
+                              <img
+                                src={card.image_url}
+                                alt={card.name}
+                                className="w-full h-full object-cover rounded"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).style.display =
+                                    "none";
+                                }}
+                              />
+                            )}
+                            <h4 className="font-semibold text-sm">
+                              {card.name}
+                            </h4>
+                            <div className="flex items-center justify-between">
+                              {getRarityBadge(card.rarity)}
+                            </div>
+                            <div className="flex gap-1">
+                              {getColorBadges(card.colors)}
+                            </div>
+                            <p className="text-xs text-muted-foreground">
+                              {card.type_line}
+                            </p>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ) : null
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      {((draftSession && draftSession.status === "completed") ||
+        viewingDraft) && (
+        <div className="space-y-6">
+          {/* Draft Summary Header */}
+          <Card className="bg-gradient-to-r from-yellow-50 to-orange-50 border-yellow-200">
+            <CardHeader className="text-center">
+              <CardTitle className="flex items-center justify-center gap-3 text-2xl text-yellow-700">
+                <Trophy className="h-8 w-8" />
+                Draft Completed!
+              </CardTitle>
+              <p className="text-muted-foreground">
+                Set: {(viewingDraft || draftSession)?.set_code} •{" "}
+                {(viewingDraft || draftSession)?.total_packs} packs • 8 players
+              </p>
+            </CardHeader>
+          </Card>
+
+          {/* Your Draft Pool */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="h-5 w-5" />
+                Your Draft Pool (
+                {(viewingDraft || draftSession)?.user_picks.length} cards)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-3">
+                {(viewingDraft || draftSession)?.user_picks.map((card, index) =>
+                  card ? (
+                    <div
+                      key={`user-pick-${card.id}-${index}-${card.name}`}
+                      className="flex items-center gap-3 p-3 border rounded-lg bg-gradient-to-r from-blue-50 to-indigo-50 hover:shadow-md transition-shadow"
+                    >
+                      <div className="flex-shrink-0">
+                        <span className="inline-flex items-center justify-center w-6 h-6 text-xs font-medium text-blue-600 bg-blue-100 rounded-full">
+                          {index + 1}
+                        </span>
+                      </div>
+                      <div className="flex-grow min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">
+                          {card.name}
+                        </p>
+                        <p className="text-xs text-gray-500 truncate">
+                          {card.type_line}
+                        </p>
+                      </div>
+                      <div className="flex-shrink-0">
+                        {getRarityBadge(card.rarity)}
+                      </div>
+                    </div>
+                  ) : null
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* AI Players Summary */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Users className="h-5 w-5" />
+                AI Players Summary
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {Object.entries(
+                  (viewingDraft || draftSession)?.ai_players || {}
+                ).map(([playerKey, picks]) => (
+                  <div
+                    key={playerKey}
+                    className="border rounded-lg p-4 bg-gray-50"
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="font-semibold text-sm text-gray-700">
+                        {playerKey.replace("player", "AI ")}
+                      </h4>
+                      <span className="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded-full">
+                        {picks?.length || 0} cards
+                      </span>
+                    </div>
+                    <div className="space-y-1 max-h-40 overflow-y-auto">
+                      {(picks || []).map((card, index) =>
+                        card ? (
+                          <div
+                            key={`ai-${playerKey}-${card.id}-${index}-${card.name}`}
+                            className="flex items-center gap-2 p-2 border rounded bg-white text-xs"
+                          >
+                            <span className="text-gray-400 w-4">
+                              {index + 1}.
+                            </span>
+                            <span className="truncate flex-grow text-gray-700">
+                              {card.name}
+                            </span>
+                            <div className="flex-shrink-0">
+                              {getRarityBadge(card.rarity)}
+                            </div>
+                          </div>
+                        ) : null
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Actions */}
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex justify-center gap-4">
+                {viewingDraft ? (
+                  <Button
+                    onClick={() => (window.location.href = "/dashboard")}
+                    size="lg"
+                    className="px-8"
+                  >
+                    Back to Dashboard
+                  </Button>
+                ) : (
+                  <Button onClick={resetDraft} size="lg" className="px-8">
+                    Start New Draft
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
