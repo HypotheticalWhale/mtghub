@@ -138,46 +138,6 @@ export function Header() {
           <Link href="/" className="flex items-center">
             <Logo />
           </Link>
-
-          <NavigationMenu>
-            <NavigationMenuList>
-              {sections.map((section) => (
-                <NavigationMenuItem key={section.title}>
-                  <NavigationMenuTrigger>{section.title}</NavigationMenuTrigger>
-                  <NavigationMenuContent>
-                    <ul className="grid w-[200px] gap-2">
-                      {section.links.map((link) => (
-                        <li key={link.href}>
-                          <NavigationMenuLink asChild>
-                            <a
-                              href={link.href}
-                              onClick={(e) => handleClick(e, link.href)}
-                              className="block select-none space-y-1 rounded-md p-3 leading-none no-underline outline-none transition-colors hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground"
-                              target={
-                                link.href.startsWith("/info/")
-                                  ? "_blank"
-                                  : undefined
-                              }
-                              rel={
-                                link.href.startsWith("/info/")
-                                  ? "noopener noreferrer"
-                                  : undefined
-                              }
-                            >
-                              <div className="text-sm font-medium leading-none">
-                                {link.label}
-                              </div>
-                            </a>
-                          </NavigationMenuLink>
-                        </li>
-                      ))}
-                    </ul>
-                  </NavigationMenuContent>
-                </NavigationMenuItem>
-              ))}
-            </NavigationMenuList>
-          </NavigationMenu>
-
           <AuthNav authUser={authUser} />
         </div>
       </div>

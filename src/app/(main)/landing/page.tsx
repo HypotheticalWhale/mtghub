@@ -10,7 +10,7 @@ export default function LandingPage() {
       <div className="text-center space-y-4">
         <h1 className="text-4xl font-bold">Welcome to {brand.name}</h1>
         <span className="text-muted-foreground max-w-md">
-          {brand.description} Check out the README to get started.
+          {brand.description}
         </span>
       </div>
 
@@ -21,18 +21,6 @@ export default function LandingPage() {
         <Button variant="outline" asChild>
           <Link href="/auth/login">Login</Link>
         </Button>
-      </div>
-
-      <div className="mt-8 text-sm text-muted-foreground">
-        <p>
-          Need help getting started? Check out the{" "}
-          <Link
-            href="https://github.com/alexandros-lekkas/next-supa-shad-boilerplate/blob/main/README.md"
-            className="underline hover:text-foreground"
-          >
-            README
-          </Link>
-        </p>
       </div>
     </div>
   );
