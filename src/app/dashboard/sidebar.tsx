@@ -1,12 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { Computer, LayoutDashboard, Search, Users } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { Computer, LayoutDashboard, LogOut, Search, Users } from "lucide-react";
+
+import { useAuth } from "@/lib/hooks/use-auth";
 
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -36,6 +39,13 @@ const items = [
 
 export function AppSidebar() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { logOut } = useAuth();
+
+  const handleLogout = async () => {
+    await logOut();
+    router.push("/auth/login");
+  };
 
   return (
     <Sidebar collapsible="icon" variant="sidebar">
@@ -74,6 +84,20 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
+
+      <SidebarFooter>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              className="text-destructive hover:bg-destructive/10 py-4 px-4 text-lg transition-all duration-150 cursor-pointer"
+              onClick={handleLogout}
+            >
+              <LogOut className="h-5 w-5" />
+              <span className="text-base">Log out</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarFooter>
     </Sidebar>
   );
 }

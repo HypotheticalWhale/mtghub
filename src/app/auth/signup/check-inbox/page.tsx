@@ -18,14 +18,13 @@ function CheckInboxContent() {
           <CardContent className="p-6">
             <div className="flex flex-col items-center text-center gap-6">
               <h1 className="text-2xl font-bold">Check your inbox</h1>
-              <p className="text-balance text-muted-foreground">
+              <p className="text-xl text-balance text-muted-foreground">
                 We've sent a confirmation email to{" "}
-                <span className="font-semibold">{email}</span>. Please check
-                your inbox and click the link to verify your email address.
+                <span className="font-bold">{email}</span>. There's no link to no email so
+                just log in using the email and password you provided.
               </p>
               <p className="text-sm text-muted-foreground">
-                Didn't receive the email? Check your spam folder or contact
-                support.
+                hope you enjoyed the login process :D
               </p>
               <Button asChild className="w-full">
                 <Link href="/auth/login">Back to login</Link>
